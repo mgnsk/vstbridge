@@ -123,6 +123,18 @@ class Configuration {
     bool editor_xembed = true;
 
     /**
+     * Strip `WS_SYSMENU` from captionless top level popup windows created by
+     * the plugin, so Wine maps them as override-redirect popups instead of
+     * handing them to the window manager. This fixes JUCE popup menus (e.g.
+     * Superior Drummer 3's kit selector) closing again right after they open
+     * with Wine 10.x and later. Disabled by default, because JUCE creates its
+     * other captionless windows (like prompts with a text field) the same way,
+     * and those then aren't managed by the window manager either. See
+     * `PopupStyleFixer` in `editor.h`.
+     */
+    bool editor_popup_fix = false;
+
+    /**
      * The number of times per second we'll handle the event loop. In most
      * plugins this also controls the plugin editor GUI's refresh rate.
      *
@@ -212,6 +224,7 @@ class Configuration {
         s.value1b(editor_coordinate_hack);
         s.value1b(editor_force_dnd);
         s.value1b(editor_xembed);
+        s.value1b(editor_popup_fix);
         s.ext(frame_rate, bitsery::ext::InPlaceOptional(),
               [](S& s, auto& v) { s.value4b(v); });
         s.value1b(hide_daw);

@@ -18,6 +18,13 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   `vstbridge.toml` settings, including the new `environment` option, without
   using the terminal. It only rewrites that plugin's section, so comments and
   other sections are kept.
+- Added an `editor_popup_fix` option for popup menus in JUCE plugins, such as
+  Superior Drummer 3, EZdrummer 3 and Hofa plugins, that close again right
+  after they open with Wine 10.x and later. It removes `WS_SYSMENU` from
+  captionless, non-resizable popup windows so Wine doesn't hand them to the
+  window manager. It's off by default and can be turned on per plugin, also
+  from the Plugins tab. Root cause analysis and original patch by
+  singularity098.
 - Added support for aarch64 Linux, such as the Raspberry Pi 5. The native
   plugin libraries and vstbridgectl build for aarch64. Windows plugins run
   through Wine's ARM64EC support with FEX for x86 emulation. ARM64 plugin DLLs

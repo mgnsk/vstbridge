@@ -123,6 +123,49 @@ class DeferredWin32Window {
 };
 
 /**
+ * Prevents Wine from handing plugin popup windows (like JUCE's popup menus) to
+ * the window manager, for as long as at least one enabled instance exists.
+ * JUCE creates its popup menus with `WS_POPUP | WS_SYSMENU`, and Wine treats
+ * popup windows with a system menu as managed top level windows instead of
+ * override-redirect popups. Window managers like KWin then treat the menu as a
+ * regular window, which with Wine 10.x and later causes the menu to close again
+ * right after it opens (Superior Drummer 3, EZdrummer 3, Hofa plugins). We
+ * strip `WS_SYSMENU` from captionless, non-resizable top level popup windows
+ * created on the GUI thread so Wine maps them as override-redirect windows,
+ * just like a native application's menus. This is only enabled with the
+ * `editor_popup_fix` option, since JUCE creates its other captionless windows
+ * the same way.
+ *
+ * Based on a patch by singularity098.
+ */
+class PopupStyleFixer {
+   public:
+    /**
+     * Install the `WH_CBT` hook on the current thread if `enabled` is set and
+     * this is the first enabled instance.
+     */
+    PopupStyleFixer(bool enabled, Logger& logger);
+
+    /**
+     * Remove the hook again when this is the last enabled instance.
+     */
+    ~PopupStyleFixer() noexcept;
+
+    PopupStyleFixer(const PopupStyleFixer&) = delete;
+    PopupStyleFixer& operator=(const PopupStyleFixer&) = delete;
+    /**
+     * Needed because `ClapPluginInstance`, which holds an
+     * `std::optional<Editor>`, gets moved into a map. The moved-from instance
+     * no longer counts as a user of the hook.
+     */
+    PopupStyleFixer(PopupStyleFixer&& other) noexcept;
+    PopupStyleFixer& operator=(PopupStyleFixer&&) = delete;
+
+   private:
+    bool enabled_;
+};
+
+/**
  * A wrapper around the win32 windowing API to create and destroy editor
  * windows. We can embed this window into the window provided by the host, and a
  * VST plugin can then later embed itself in the window create here.
@@ -490,4 +533,12 @@ class Editor {
      * The atom corresponding to `_XEMBED`.
      */
     xcb_atom_t xcb_xembed_message_;
+
+    /**
+     * Keeps plugin popup windows, like JUCE's popup menus, from being managed
+     * by the window manager while this editor is open. This needs to be the
+     * last member so the hook is only installed after `win32_window_` has been
+     * created, and so it gets removed first.
+     */
+    PopupStyleFixer popup_style_fixer_;
 };

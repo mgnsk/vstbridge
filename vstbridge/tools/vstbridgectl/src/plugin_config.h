@@ -43,6 +43,7 @@ struct PluginOptions {
     bool editor_disable_host_scaling = false;
     bool editor_force_dnd = false;
     bool editor_xembed = true;
+    bool editor_popup_fix = false;
     std::optional<double> frame_rate;
     bool hide_daw = false;
     bool vst3_prefer_32bit = false;

@@ -20,6 +20,12 @@ XEmbed is also enabled by default in this fork (`editor_xembed = true` in `src/c
 
 For the full technical analysis see [readme-fixes.md](https://github.com/rations/vstbridge/blob/master/readme-fixes.md).
 
+### JUCE popup menu fix (Superior Drummer 3, EZdrummer 3, Hofa)
+
+With Wine 10.x and later, popup menus in some JUCE plugins open and immediately close again, for example the kit selector in Superior Drummer 3. JUCE creates its menus as `WS_POPUP | WS_SYSMENU` windows, and Wine treats a popup with a system menu as a window the window manager should manage. The fix removes `WS_SYSMENU` from captionless, non-resizable popup windows before Wine creates their X11 window, so they are mapped as override-redirect popups like native menus. Windows with a title bar or a resize frame are not touched.
+
+This is off by default, because JUCE creates its other windows without a title bar the same way, such as prompts with a text field, and those lose window manager handling too. If a plugin's menus close as soon as they open, turn it on for that plugin: tick **Fix popup menus that close immediately** in vstbridgectl's Plugins tab, or set `editor_popup_fix = true` in `vstbridge.toml`. Run with `VSTBRIDGE_DEBUG_LEVEL=+editor` to log every window it changes. Root cause analysis and the original patch by singularity098.
+
 ### GTK3 GUI for vstbridgectl
 
 The upstream yabridgectl management tool is command-line only. vstbridge adds a GTK3 graphical interface (`vstbridgectl-gtk`) for users who prefer not to use the terminal.
@@ -272,6 +278,7 @@ vstbridge adds a few options on top of yabridge's:
 |--------|--------|-------------|
 | `editor_xembed` | `{true,false}` | Embed the editor with XEmbed. Defaults to `true`. Set it to `false` to use yabridge's reparenting method instead. |
 | `editor_coordinate_hack` | `{true,false}` | Move the Wine window back to `(0, 0)` after every resize. This helps plugins that draw their GUI offset by the window's screen position. Defaults to `false`. |
+| `editor_popup_fix` | `{true,false}` | Fix JUCE popup menus that close as soon as they open with Wine 10.x and later (Superior Drummer 3, EZdrummer 3, Hofa). See [the popup menu fix](#juce-popup-menu-fix-superior-drummer-3-ezdrummer-3-hofa). Defaults to `false`. |
 | `environment` | `["KEY=VALUE", ...]` | Extra environment variables for this plugin's Wine host process. They override vstbridge's own settings, including `WINEPREFIX`. Defaults to none. |
 
 `environment` lets plugins with different Wine requirements share one prefix. For example, you can give one plugin its own DLL overrides:

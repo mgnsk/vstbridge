@@ -229,6 +229,8 @@ std::vector<std::string> render_section(const std::string& key,
         out.push_back("editor_force_dnd = true");
     if (!options.editor_xembed)
         out.push_back("editor_xembed = false");
+    if (options.editor_popup_fix)
+        out.push_back("editor_popup_fix = true");
     if (options.frame_rate) {
         std::ostringstream value;
         if (std::floor(*options.frame_rate) == *options.frame_rate)
@@ -339,6 +341,8 @@ PluginOptions read_plugin_options(const PluginConfigTarget& target) {
             options.editor_force_dnd = *node.value<bool>();
         } else if (name == "editor_xembed" && node.is_boolean()) {
             options.editor_xembed = *node.value<bool>();
+        } else if (name == "editor_popup_fix" && node.is_boolean()) {
+            options.editor_popup_fix = *node.value<bool>();
         } else if (name == "frame_rate" && node.is_number()) {
             options.frame_rate = node.value<double>();
         } else if (name == "hide_daw" && node.is_boolean()) {

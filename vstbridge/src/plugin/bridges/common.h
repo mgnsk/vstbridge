@@ -302,6 +302,9 @@ class PluginBridge {
         if (config_.editor_xembed) {
             other_options.push_back("editor: XEmbed");
         }
+        if (config_.editor_popup_fix) {
+            other_options.push_back("editor: popup fix");
+        }
         if (config_.frame_rate) {
             std::ostringstream option;
             option << "frame rate: " << std::setprecision(2)

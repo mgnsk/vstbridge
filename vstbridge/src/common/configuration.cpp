@@ -126,6 +126,12 @@ Configuration::Configuration(const fs::path& config_path,
                 } else {
                     invalid_options.emplace_back(key);
                 }
+            } else if (key == "editor_popup_fix") {
+                if (const auto parsed_value = value.as_boolean()) {
+                    editor_popup_fix = parsed_value->get();
+                } else {
+                    invalid_options.emplace_back(key);
+                }
             } else if (key == "environment") {
                 // An array of `KEY=VALUE` strings. Any malformed entry
                 // invalidates the whole option so typos don't go unnoticed.

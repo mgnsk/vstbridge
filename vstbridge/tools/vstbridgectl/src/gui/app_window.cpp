@@ -866,6 +866,14 @@ void AppWindow::configure_plugin(size_t index) {
         "Uncheck this to use the reparenting method instead. Try this if a "
         "plugin's editor doesn't show up, renders incorrectly or doesn't resize.",
         opts.editor_xembed);
+    GtkWidget* popup_cb = make_option_check(grid, row,
+        "Fix popup menus that close immediately",
+        "For JUCE plugins whose menus open and close again right away with "
+        "Wine 10 and later, such as Superior Drummer 3, EZdrummer 3 and Hofa "
+        "plugins. Leave this off unless a plugin needs it: it also affects the "
+        "plugin's other windows without a title bar, such as prompts with a "
+        "text field.",
+        opts.editor_popup_fix);
     GtkWidget* coord_cb = make_option_check(grid, row,
         "Editor coordinate hack",
         "Move the Wine window back to (0, 0) after every resize. Helps plugins "
@@ -958,6 +966,7 @@ void AppWindow::configure_plugin(size_t index) {
                 opts.group = group.empty() ? std::nullopt
                                            : std::optional<std::string>(group);
                 opts.editor_xembed               = toggle(xembed_cb);
+                opts.editor_popup_fix            = toggle(popup_cb);
                 opts.editor_coordinate_hack      = toggle(coord_cb);
                 opts.editor_force_dnd            = toggle(dnd_cb);
                 opts.editor_disable_host_scaling = toggle(scaling_cb);

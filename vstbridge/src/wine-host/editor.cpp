@@ -192,6 +192,75 @@ xcb_window_t get_x11_handle(HWND win32_handle) noexcept;
  */
 ATOM get_window_class() noexcept;
 
+namespace {
+
+bool popup_fix_tracing = false;
+int popup_fix_users = 0;
+HHOOK popup_fix_hook = nullptr;
+
+LRESULT CALLBACK popup_fix_cbt_proc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HCBT_CREATEWND) {
+        const HWND window = reinterpret_cast<HWND>(wParam);
+        const LONG style = GetWindowLong(window, GWL_STYLE);
+        const LONG ex_style = GetWindowLong(window, GWL_EXSTYLE);
+
+        // Only captionless, non-resizable popup windows that are not supposed
+        // to show up in the task bar. Regular plugin windows and dialogs are
+        // left alone.
+        if (!(style & WS_CHILD) && (style & WS_POPUP) &&
+            (style & WS_CAPTION) != WS_CAPTION && !(style & WS_THICKFRAME) &&
+            (style & WS_SYSMENU) && !(ex_style & WS_EX_APPWINDOW)) {
+            SetWindowLong(window, GWL_STYLE, style & ~WS_SYSMENU);
+
+            // This goes to STDERR instead of through a `Logger` since the hook
+            // can outlive the editor that installed it. STDERR gets captured
+            // and logged by the plugin side.
+            if (popup_fix_tracing) {
+                std::cerr << "DEBUG: Removed WS_SYSMENU from popup window "
+                          << window << std::hex << " (style 0x" << style
+                          << ", exstyle 0x" << ex_style << std::dec
+                          << ") so Wine won't let the window manager manage it"
+                          << std::endl;
+            }
+        }
+    }
+
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+}  // namespace
+
+PopupStyleFixer::PopupStyleFixer(bool enabled, Logger& logger)
+    : enabled_(enabled) {
+    if (!enabled_) {
+        return;
+    }
+
+    // All editors live on the same GUI thread, so a single thread-local hook
+    // shared between them is enough
+    if (popup_fix_users++ == 0) {
+        popup_fix_tracing = logger.editor_tracing_;
+        popup_fix_hook = SetWindowsHookEx(WH_CBT, popup_fix_cbt_proc, nullptr,
+                                          GetCurrentThreadId());
+    }
+}
+
+PopupStyleFixer::~PopupStyleFixer() noexcept {
+    if (!enabled_ || --popup_fix_users > 0) {
+        return;
+    }
+
+    if (popup_fix_hook) {
+        UnhookWindowsHookEx(popup_fix_hook);
+        popup_fix_hook = nullptr;
+    }
+}
+
+PopupStyleFixer::PopupStyleFixer(PopupStyleFixer&& other) noexcept
+    : enabled_(other.enabled_) {
+    other.enabled_ = false;
+}
+
 DeferredWin32Window::DeferredWin32Window(
     MainContext& main_context,
     std::shared_ptr<xcb_connection_t> x11_connection,
@@ -339,7 +408,8 @@ Editor::Editor(MainContext& main_context,
       host_window_(find_host_window(*x11_connection_,
                                     parent_window_,
                                     xcb_wm_state_property_)
-                       .value_or(parent_window_)) {
+                       .value_or(parent_window_)),
+      popup_style_fixer_(config.editor_popup_fix, logger) {
     logger.log_editor_trace([&]() {
         return "DEBUG: host_window: " + std::to_string(host_window_);
     });

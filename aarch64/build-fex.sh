@@ -25,6 +25,11 @@ git init -q "$work/FEX"
 git -C "$work/FEX" remote add origin https://github.com/FEX-Emu/FEX.git
 git -C "$work/FEX" fetch -q --depth 1 origin "$FEX_COMMIT"
 git -C "$work/FEX" checkout -q FETCH_HEAD
+# vstbridge's FEX patches (aarch64/fex/patches), for iLok-protected plugins
+for patch in "$here"/fex/patches/*.patch; do
+    echo "Applying $(basename "$patch")"
+    git -C "$work/FEX" apply "$patch"
+done
 # Only the submodules the Windows build needs, not the large test binary repos
 git -C "$work/FEX" submodule update --init --depth 1 \
     External/fmt External/range-v3 External/rpmalloc External/tracy External/unordered_dense \

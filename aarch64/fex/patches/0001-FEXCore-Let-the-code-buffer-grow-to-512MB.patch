@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rations <ehqcar@proton.me>
+Date: Sat, 17 Oct 2026 01:22:14 +1000
+Subject: [PATCH 1/2] FEXCore: Let the code buffer grow to 512MB.
+
+PACE License Services (LDSvc.exe, which iLok-protected plugins such as Neural DSP's talk to) has
+92MB of x86-64 code. While it serves a plugin it needs more than 128MB of JIT code, so the
+buffer filled every ~14 seconds, the whole cache was cleared and recompiled, and LDSvc used all
+its time compiling: the plugin waited minutes for its license. With 512MB it clears once and
+then goes idle.
+
+The 128MB cap was there to keep branches short. Block linking already checks the range
+(IsInt26) and falls back to an indirect jump, branches inside a block and to its jump thunks
+stay within the block, and the dispatcher is reached through pointers in the CPU state. The
+buffer is reserved, not committed, so programs that need less code use no more memory.
+---
+ FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp b/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
+index eee502364..fa2dd71f2 100644
+--- a/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
++++ b/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
+@@ -13,8 +13,10 @@
+ 
+ namespace FEXCore::CPU {
+ static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 16;
+-// We don't want to move above 128MB atm because that means we will have to encode longer jumps
+-static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 128;
++// Pivuan: PACE's LDSvc (92 MB of x86 code) needs more than 128MB of JIT code; with 128MB it
++// clears the whole cache every few seconds and recompiles. Block linking already falls back to
++// indirect jumps past +-128MB, and branches inside a block stay short.
++static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 512;
+ 
+ CodeBuffer::CodeBuffer(size_t Size, bool ShouldBeNamed)
+   : AllocatedSize(Size) {

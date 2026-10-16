@@ -9,8 +9,8 @@ through Wine's ARM64EC support and FEX's `libarm64ecfex.dll`.
 - `versions.sh`: pinned Wine, wine-staging, llvm-mingw and FEX versions.
 - `build-wine.sh`: builds wine-staging for `arm64ec,aarch64,i386` with the patches below,
   installed to `/opt/vstbridge/wine`.
-- `build-fex.sh`: builds FEX's `libarm64ecfex.dll`, `libwow64fex.dll` and their unixlibs, which
-  install into the same Wine tree.
+- `build-fex.sh`: builds FEX's `libarm64ecfex.dll`, `libwow64fex.dll` and their unixlibs, with
+  the patches in `fex/patches/`. They install into the same Wine tree.
 - `wine/patches/`:
   - `0001`: `IDXGIOutput::WaitForVBlank()` waits for a refresh interval instead of returning
     `E_NOTIMPL`. JUCE 8's Direct2D renderer spins on the stub, so without this, plugin editors
@@ -29,6 +29,18 @@ through Wine's ARM64EC support and FEX's `libarm64ecfex.dll`.
     `HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor`. The Windows programs and plugins run here
     are x86-64, and installers that find an ARM CPU there (iLok's) install ARM64 files they can't
     load.
+  - `0007`: the x64 debug registers (Dr0-Dr3, Dr6, Dr7) and the resume flag of ARM64EC threads
+    go to FEX (FEX patch `0002`) instead of being dropped. iLok-protected plugins (PACE, such as
+    Neural DSP's) set execute breakpoints on their own threads and fail with `c0000409` when they
+    don't trap.
+- `fex/patches/`:
+  - `0001`: FEX's JIT code buffer can grow to 512 MB instead of 128 MB. PACE License Services
+    (`LDSvc.exe`, 92 MB of x86-64 code) needs more while it serves a plugin. With 128 MB, FEX
+    threw away and recompiled its code every few seconds, and plugins waited minutes for their
+    license. The buffer is only reserved, so other programs use no more memory.
+  - `0002`: x86 execute breakpoints. FEX keeps each thread's debug registers (from Wine patch
+    `0007`) and raises `EXCEPTION_SINGLE_STEP` before an instruction at an enabled Dr0-Dr3
+    address, with Dr6 and the resume flag as on x86. Data breakpoints aren't emulated.
 
 - `build-debs.sh`: packages everything for the Pivuan apt repository (below).
 

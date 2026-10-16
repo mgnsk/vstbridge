@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rations <ehqcar@proton.me>
+Date: Sat, 17 Oct 2026 01:23:10 +1000
+Subject: [PATCH] ntdll: Keep the x64 debug registers of ARM64EC threads.
+
+The ARM64 context has no room for the AMD64 debug registers, so context_x64_to_arm() dropped
+Dr0-Dr3, Dr6 and Dr7 on every NtSetContextThread and NtContinue, and x64 code always read them
+back as 0. PACE's anti-tamper code (iLok-protected plugins such as Neural DSP's) sets execute
+breakpoints on its own thread and fails when they don't trap.
+
+Pass them, and EFlags for the resume flag, to the emulator through two optional exports,
+SetThreadDebugContext and GetThreadDebugContext (vstbridge's FEX patch), from
+NtSetContextThread, NtContinue, NtContinueEx and NtGetContextThread. The emulator raises the
+breakpoints and fills the debug registers into the x64 exception context. This is for Pivuan's
+wine-fex, not for upstream: an upstream version would need an agreed emulator interface.
+---
+ dlls/ntdll/signal_arm64ec.c | 43 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/signal_arm64ec.c b/dlls/ntdll/signal_arm64ec.c
+index 1a8174e7d71..847e9634f48 100644
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -56,6 +56,9 @@ static void     (WINAPI *pResetToConsistentState)(EXCEPTION_RECORD*,CONTEXT*,ARM
+ static NTSTATUS (WINAPI *pThreadInit)(void);
+ static void     (WINAPI *pThreadTerm)(HANDLE,LONG);
+ static void     (WINAPI *pUpdateProcessorInformation)(SYSTEM_CPU_INFORMATION*);
++/* FEX functions (vstbridge's FEX patch) for what the ARM64 context has no room for */
++static void     (WINAPI *pGetThreadDebugContext)(HANDLE,CONTEXT*);
++static void     (WINAPI *pSetThreadDebugContext)(HANDLE,const CONTEXT*);
+ 
+ static BOOLEAN emulated_processor_features[PROCESSOR_FEATURE_MAX];
+ static BYTE KiUserExceptionDispatcher_orig[16]; /* to detect patching */
+@@ -214,6 +217,8 @@ NTSTATUS arm64ec_process_init( HMODULE module )
+     GET_PTR( ThreadInit );
+     GET_PTR( ThreadTerm );
+     GET_PTR( UpdateProcessorInformation );
++    GET_PTR( GetThreadDebugContext );
++    GET_PTR( SetThreadDebugContext );
+ #undef GET_PTR
+ 
+     RtlGetCurrentPeb()->ChpeV2ProcessInfo = info;
+@@ -664,10 +669,37 @@ NTSTATUS SYSCALL_API NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE
+     return status;
+ }
+ 
++/* x64 debug registers (Dr0-Dr3, Dr6, Dr7) and the resume flag have no place in the ARM64
++ * context, so the emulator keeps them for its execute breakpoints. This doesn't use
++ * leave_syscall_callback(): its suspend path calls NtContinue, which comes back here, and the
++ * emulator checks for a suspend itself when the thread runs x64 code again. */
++static void set_emulator_debug_context( HANDLE handle, const CONTEXT *context )
++{
++    CHPE_V2_CPU_AREA_INFO *cpu_area = get_arm64ec_cpu_area();
++
++    if (!pSetThreadDebugContext || cpu_area->InSyscallCallback) return;
++    if (!(context->ContextFlags & (CONTEXT_AMD64_DEBUG_REGISTERS | CONTEXT_AMD64_CONTROL) & ~CONTEXT_AMD64)) return;
++    cpu_area->InSyscallCallback = 1;
++    pSetThreadDebugContext( handle, context );
++    cpu_area->InSyscallCallback = 0;
++}
++
++static void get_emulator_debug_context( HANDLE handle, CONTEXT *context, ULONG flags )
++{
++    CHPE_V2_CPU_AREA_INFO *cpu_area = get_arm64ec_cpu_area();
++
++    if (!pGetThreadDebugContext || cpu_area->InSyscallCallback) return;
++    if ((flags & CONTEXT_AMD64_DEBUG_REGISTERS) != CONTEXT_AMD64_DEBUG_REGISTERS) return;
++    cpu_area->InSyscallCallback = 1;
++    pGetThreadDebugContext( handle, context );
++    cpu_area->InSyscallCallback = 0;
++}
++
+ NTSTATUS SYSCALL_API NtContinue( CONTEXT *context, BOOLEAN alertable )
+ {
+     ARM64_NT_CONTEXT arm_ctx;
+ 
++    set_emulator_debug_context( GetCurrentThread(), context );
+     context_x64_to_arm( &arm_ctx, (ARM64EC_NT_CONTEXT *)context );
+     return syscall_NtContinue( &arm_ctx, alertable );
+ }
+@@ -676,6 +708,7 @@ NTSTATUS SYSCALL_API NtContinueEx( CONTEXT *context, KCONTINUE_ARGUMENT *args )
+ {
+     ARM64_NT_CONTEXT arm_ctx;
+ 
++    set_emulator_debug_context( GetCurrentThread(), context );
+     context_x64_to_arm( &arm_ctx, (ARM64EC_NT_CONTEXT *)context );
+     return syscall_NtContinueEx( &arm_ctx, args );
+ }
+@@ -719,10 +752,15 @@ NTSTATUS SYSCALL_API NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_
+ 
+ NTSTATUS SYSCALL_API NtGetContextThread( HANDLE handle, CONTEXT *context )
+ {
+-    ARM64_NT_CONTEXT arm_ctx = { .ContextFlags = ctx_flags_x64_to_arm( context->ContextFlags ) };
++    ULONG flags = context->ContextFlags;
++    ARM64_NT_CONTEXT arm_ctx = { .ContextFlags = ctx_flags_x64_to_arm( flags ) };
+     NTSTATUS status = syscall_NtGetContextThread( handle, &arm_ctx );
+ 
+-    if (!status) context_arm_to_x64( (ARM64EC_NT_CONTEXT *)context, &arm_ctx );
++    if (!status)
++    {
++        context_arm_to_x64( (ARM64EC_NT_CONTEXT *)context, &arm_ctx );
++        get_emulator_debug_context( handle, context, flags );
++    }
+     return status;
+ }
+ 
+@@ -835,6 +873,7 @@ NTSTATUS SYSCALL_API NtSetContextThread( HANDLE handle, const CONTEXT *context )
+ {
+     ARM64_NT_CONTEXT arm_ctx;
+ 
++    set_emulator_debug_context( handle, context );
+     context_x64_to_arm( &arm_ctx, (ARM64EC_NT_CONTEXT *)context );
+     return syscall_NtSetContextThread( handle, &arm_ctx );
+ }

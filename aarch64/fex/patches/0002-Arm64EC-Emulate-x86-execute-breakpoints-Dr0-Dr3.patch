@@ -1,0 +1,455 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rations <ehqcar@proton.me>
+Date: Sat, 17 Oct 2026 01:22:14 +1000
+Subject: [PATCH 2/2] Arm64EC: Emulate x86 execute breakpoints (Dr0-Dr3).
+
+PACE's anti-tamper code (iLok-protected plugins such as Neural DSP's) sets Dr0-Dr3 on its own
+thread with SetThreadContext and expects EXCEPTION_SINGLE_STEP each time a probe address runs,
+with Dr6 = 0xffff0ff0 | the slots that hit. Under ARM64EC the debug registers were dropped, the
+probes never trapped and the plugin failed later with c0000409.
+
+Wine's ARM64 context has no room for the x64 debug registers, so Wine's ARM64EC
+NtSetContextThread, NtContinue(Ex) and NtGetContextThread pass them to the new exports
+SetThreadDebugContext and GetThreadDebugContext (vstbridge's wine-fex patch). FEX keeps them per
+thread, adds enabled execute breakpoints (R/W=00) to a process-wide address set and invalidates
+code compiled there. Before an instruction at an address in the set, the JIT compares it with
+the thread's breakpoints and raises #DB (TRAP_HWBKPT) on a hit, unless the resume flag (RF) skips
+it once. The exception context reports Dr0-Dr3, Dr6, Dr7 and RF as x86 Linux and Windows do,
+and single steps report Dr6 with BS. Code with no breakpoints compiles as before; pages with
+breakpoints bypass the disk cache. Data breakpoints aren't emulated.
+---
+ FEXCore/Source/Interface/Context/Context.h    |   7 +
+ FEXCore/Source/Interface/Core/Core.cpp        |  30 +++-
+ .../Interface/Core/OpcodeDispatcher.cpp       |  43 +++++
+ .../Source/Interface/Core/OpcodeDispatcher.h  |   1 +
+ FEXCore/include/FEXCore/Core/Context.h        |   9 ++
+ FEXCore/include/FEXCore/Core/CoreState.h      |   7 +
+ Source/Windows/ARM64EC/BTInterface.h          |   3 +
+ Source/Windows/ARM64EC/Module.cpp             | 153 ++++++++++++++++++
+ Source/Windows/ARM64EC/libarm64ecfex.def      |   2 +
+ 9 files changed, 254 insertions(+), 1 deletion(-)
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index ebceec145..8e44f21ee 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -244,6 +244,9 @@ public:
+ 
+   void RemoveForceTSOInformation(uint64_t Address, uint64_t Size) override;
+ 
++  bool AddExecuteBreakpoint(uint64_t Address) override;
++  bool HasExecuteBreakpointInRange(uint64_t Address, uint64_t Size) const;
++
+   void MarkMonoDetected() override {
+     MonoDetected = true;
+   }
+@@ -512,6 +515,10 @@ private:
+   fextl::unordered_map<uint64_t, CustomIRHandlerEntry> CustomIRHandlers;
+   IntervalList<uint64_t> ForceTSOValidRanges; // The ranges for which ForceTSOInstructions has populated data
+   fextl::set<uint64_t> ForceTSOInstructions;
++  // Addresses of the x86 execute breakpoints any thread has set. It never shrinks: a check whose
++  // breakpoint is gone just doesn't trap. Changed with CodeInvalidationMutex held uniquely.
++  fextl::set<uint64_t> ExecuteBreakpoints;
++  std::atomic<bool> HasExecuteBreakpoints {};
+ 
+   bool MonoDetected = false;
+   std::atomic<uint64_t> MonoBackpatcherBlock;
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 63280a42a..63b4bcf0a 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -641,6 +641,10 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+           Thread->OpDispatcher->_GuestOpcode(InstAddress - GuestRIP);
+         }
+ 
++        if (HasExecuteBreakpoints.load(std::memory_order_relaxed) && ExecuteBreakpoints.contains(InstAddress)) {
++          Thread->OpDispatcher->ExecuteBreakpointCheck(InstAddress - GuestRIP);
++        }
++
+         if (Config.SMCChecks == FEXCore::Config::CONFIG_SMC_FULL || Block.ForceFullSMCDetection) {
+           auto ExistingCodePtr = reinterpret_cast<uint8_t*>(Block.Entry + BlockInstructionsLength);
+           auto InstAddressReg = Thread->OpDispatcher->_EntrypointOffset(GPRSize, InstAddress - GuestRIP);
+@@ -883,6 +887,13 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+   {
+     FEXCORE_PROFILE_ACCUMULATION(Thread, AccumulatedDiskCacheLookupTime);
+     Hit = DiskCache.Lookup(Thread, Region, GuestRIP, DiskCacheGuestCodeKey);
++    // Cached code has no execute breakpoint checks: compile pages with breakpoints afresh
++    if (Hit && std::ranges::any_of(Hit->GuestPages, [this](uint64_t Page) {
++          return HasExecuteBreakpointInRange(Page, FEXCore::Utils::FEX_PAGE_SIZE);
++        })) {
++      Hit.reset();
++      DiskCacheGuestCodeKey.reset();
++    }
+     if (Hit && !DiskCache.IsValidating()) {
+       auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode);
+       if (LoadedCode.BlockBegin) {
+@@ -991,7 +1002,8 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+ 
+   // Disk Cache
+   if (!CodeCache.IsGeneratingCache) {
+-    if (DiskCacheGuestCodeKey) {
++    // Don't cache execute breakpoint checks, they belong to this run only
++    if (DiskCacheGuestCodeKey && !HasExecuteBreakpointInRange(StartAddr, Length)) {
+       std::span<const FEXCore::CPU::Relocation> Relocations;
+       if (DebugData && DebugData->Relocations) {
+         Relocations = *DebugData->Relocations;
+@@ -1154,6 +1166,22 @@ void ContextImpl::RemoveForceTSOInformation(uint64_t Address, uint64_t Size) {
+   ForceTSOInstructions.erase(ForceTSOInstructions.lower_bound(Address), ForceTSOInstructions.upper_bound(Address + Size));
+ }
+ 
++bool ContextImpl::AddExecuteBreakpoint(uint64_t Address) {
++  LogMan::Throw::AFmt(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
++
++  const bool Added = ExecuteBreakpoints.insert(Address).second;
++  HasExecuteBreakpoints.store(true, std::memory_order_relaxed);
++  return Added;
++}
++
++bool ContextImpl::HasExecuteBreakpointInRange(uint64_t Address, uint64_t Size) const {
++  if (!HasExecuteBreakpoints.load(std::memory_order_relaxed)) {
++    return false;
++  }
++  auto It = ExecuteBreakpoints.lower_bound(Address);
++  return It != ExecuteBreakpoints.end() && *It < Address + Size;
++}
++
+ void ContextImpl::MarkMonoBackpatcherBlock(uint64_t BlockEntry) {
+   MonoBackpatcherBlock.store(BlockEntry, std::memory_order_relaxed);
+ }
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 8dc605ca7..145a75f40 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -5161,6 +5161,49 @@ void OpDispatchBuilder::BreakOp(OpcodeArgs, FEXCore::IR::BreakDefinition BreakDe
+   }
+ }
+ 
++// x86 execute breakpoints: emitted before an instruction whose address is in the context's
++// breakpoint set. Raises #DB (a hardware breakpoint, before the instruction runs) if one of this
++// thread's enabled Dr0-Dr3 slots points at it, unless the resume flag skips it this once.
++void OpDispatchBuilder::ExecuteBreakpointCheck(int64_t RIPOffset) {
++  const auto GPRSize = GetGPROpSize();
++
++  CalculateDeferredFlags();
++  FlushRegisterCache();
++
++  Ref Address = _EntrypointOffset(GPRSize, RIPOffset);
++  Ref Hit = Constant(0);
++  for (size_t i = 0; i < 4; ++i) {
++    Ref Breakpoint = _LoadContextGPR(OpSize::i64Bit, offsetof(FEXCore::Core::CPUState, execute_breakpoints[i]));
++    Hit = _Or(OpSize::i64Bit, Hit, _Select(OpSize::i64Bit, OpSize::i64Bit, CondClass::EQ, Breakpoint, Address, Constant(1), Constant(0)));
++  }
++  Ref ResumeRIP = _LoadContextGPR(OpSize::i64Bit, offsetof(FEXCore::Core::CPUState, breakpoint_resume_rip));
++  Ref Trap = _Select(OpSize::i64Bit, OpSize::i64Bit, CondClass::EQ, ResumeRIP, Address, Constant(0), Hit);
++
++  auto TrapCond = CondJump(Trap);
++
++  auto CurrentBlock = GetCurrentBlock();
++  auto TrapBlock = CreateNewCodeBlockAtEnd();
++  SetTrueJumpTarget(TrapCond, TrapBlock);
++  SetCurrentCodeBlock(TrapBlock);
++  StartNewBlock();
++
++  _StoreContextGPR(GPRSize, _EntrypointOffset(GPRSize, RIPOffset), offsetof(FEXCore::Core::CPUState, rip));
++  Break(FEXCore::IR::BreakDefinition {
++    .ErrorRegister = 0,
++    .Signal = Core::FAULT_SIGTRAP,
++    .TrapNumber = X86State::X86_TRAPNO_DB,
++    .si_code = 4, // TRAP_HWBKPT
++  });
++
++  auto NextBlock = CreateNewCodeBlockAfter(CurrentBlock);
++  SetFalseJumpTarget(TrapCond, NextBlock);
++  SetCurrentCodeBlock(NextBlock);
++  StartNewBlock();
++
++  // RF only lasts for one instruction
++  _StoreContextGPR(OpSize::i64Bit, Constant(0), offsetof(FEXCore::Core::CPUState, breakpoint_resume_rip));
++}
++
+ void OpDispatchBuilder::UnimplementedOp(OpcodeArgs) {
+   BreakOp(Op, FEXCore::IR::BreakDefinition {
+                 .ErrorRegister = 0,
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+index 019028221..d99070e21 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -895,6 +895,7 @@ public:
+   void Insertq(OpcodeArgs);
+ 
+   void BreakOp(OpcodeArgs, FEXCore::IR::BreakDefinition BreakDefinition);
++  void ExecuteBreakpointCheck(int64_t RIPOffset);
+   void UnimplementedOp(OpcodeArgs);
+   void PermissionRestrictedOp(OpcodeArgs);
+ 
+diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
+index 8aa448e2e..9f0f15a24 100644
+--- a/FEXCore/include/FEXCore/Core/Context.h
++++ b/FEXCore/include/FEXCore/Core/Context.h
+@@ -192,6 +192,15 @@ public:
+ 
+   FEX_DEFAULT_VISIBILITY virtual void RemoveForceTSOInformation(uint64_t Address, uint64_t Size) = 0;
+ 
++  /**
++   * @brief Makes the JIT check the threads' execute breakpoints (CPUState::execute_breakpoints) before the
++   * instruction at this address. CodeInvalidationMutex must be held uniquely, and code already compiled
++   * there must be invalidated afterwards.
++   *
++   * @return false if the address was already in the set
++   */
++  FEX_DEFAULT_VISIBILITY virtual bool AddExecuteBreakpoint(uint64_t Address) = 0;
++
+   FEX_DEFAULT_VISIBILITY virtual void MarkMonoDetected() = 0;
+ 
+   FEX_DEFAULT_VISIBILITY virtual void MarkMonoBackpatcherBlock(uint64_t BlockEntry) = 0;
+diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
+index 80514bfdc..1f250fbbe 100644
+--- a/FEXCore/include/FEXCore/Core/CoreState.h
++++ b/FEXCore/include/FEXCore/Core/CoreState.h
+@@ -248,6 +248,13 @@ struct alignas(64) CPUState {
+   constexpr static uint32_t SEGMENT_ARRAY_INDEX_GDT = 0;
+   constexpr static uint32_t SEGMENT_ARRAY_INDEX_LDT = 1;
+   Core::CPUState::gdt_segment private_gdt[32] {};
++
++  // x86 execute breakpoints (Dr0-Dr3 with R/W=00 enabled in Dr7): the address of each enabled
++  // slot, or 0 when the slot is off. The JIT compares them before every instruction at an address
++  // in the context's breakpoint set (Context::AddExecuteBreakpoint).
++  uint64_t execute_breakpoints[4] {};
++  // The resume flag (RF): the breakpoint at this address doesn't trap the next time it is reached.
++  uint64_t breakpoint_resume_rip {};
+ };
+ static_assert(std::is_trivially_copyable_v<CPUState>, "Needs to be trivial");
+ static_assert(std::is_standard_layout_v<CPUState>, "This needs to be standard layout");
+diff --git a/Source/Windows/ARM64EC/BTInterface.h b/Source/Windows/ARM64EC/BTInterface.h
+index d57603079..37831ecd6 100644
+--- a/Source/Windows/ARM64EC/BTInterface.h
++++ b/Source/Windows/ARM64EC/BTInterface.h
+@@ -22,4 +22,7 @@ void STDMETHODCALLTYPE BTCpu64NotifyMemoryDirty(void* Address, SIZE_T Size);
+ void STDMETHODCALLTYPE BTCpu64NotifyReadFile(HANDLE Handle, void* Address, SIZE_T Size, BOOL After, NTSTATUS Status);
+ BOOLEAN STDMETHODCALLTYPE BTCpu64IsProcessorFeaturePresent(UINT Feature);
+ void STDMETHODCALLTYPE UpdateProcessorInformation(SYSTEM_CPU_INFORMATION* Info);
++// Not part of the Windows emulator interface: x86 debug registers from Wine's ARM64EC context functions
++void STDMETHODCALLTYPE SetThreadDebugContext(HANDLE Thread, const CONTEXT* Context);
++void STDMETHODCALLTYPE GetThreadDebugContext(HANDLE Thread, CONTEXT* Context);
+ }
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index 7fd71d24b..1c72cbfc6 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -135,8 +135,19 @@ struct ThreadCPUArea {
+   }
+ };
+ 
++// x86 debug registers as the program set them. Wine's ARM64EC context conversion has no room for
++// them, so Wine passes them to SetThreadDebugContext and reads them with GetThreadDebugContext.
++struct DebugRegisters {
++  uint64_t Dr[4] {};
++  uint64_t Dr6 {};
++  uint64_t Dr7 {};
++};
++
+ struct FrontendThreadData {
+   bool InLockedRWXRead {};
++  DebugRegisters Debug {};
++  // Where the last execute breakpoint trapped, so that its exception context reports RF
++  uint64_t BreakpointHitRIP {};
+ };
+ 
+ namespace {
+@@ -167,6 +178,58 @@ FrontendThreadData* GetFrontendThreadData(FEXCore::Core::InternalThreadState* Th
+   return static_cast<FrontendThreadData*>(Thread->FrontendPtr);
+ }
+ 
++// Debug registers set on threads of this process that haven't run ThreadInit yet, by TID.
++// `ThreadCreationMutex` must be locked when accessing
++std::unordered_map<DWORD, DebugRegisters> PendingDebugRegisters;
++
++// The FEX state and TID of a thread of this process (the state is nullptr if the thread hasn't
++// started yet), or a TID of 0 for a thread of another process. `ThreadCreationMutex` must be locked.
++std::pair<FEXCore::Core::InternalThreadState*, DWORD> LookupThread(HANDLE Thread) {
++  THREAD_BASIC_INFORMATION Info;
++  if (NtQueryInformationThread(Thread, ThreadBasicInformation, &Info, sizeof(Info), nullptr) ||
++      reinterpret_cast<uintptr_t>(Info.ClientId.UniqueProcess) != GetCurrentProcessId()) {
++    return {nullptr, 0};
++  }
++  const auto TID = static_cast<DWORD>(reinterpret_cast<uintptr_t>(Info.ClientId.UniqueThread));
++  const auto It = Threads.find(TID);
++  return {It != Threads.end() ? It->second : nullptr, TID};
++}
++
++// Gives the JIT the enabled execute breakpoints (R/W=00) of Dr0-Dr3 and makes it check their
++// addresses. Data breakpoints aren't emulated. `ThreadCreationMutex` must be locked.
++void ApplyDebugRegisters(FEXCore::Core::InternalThreadState* Thread, const DebugRegisters& Debug) {
++  for (size_t i = 0; i < 4; i++) {
++    const bool Enabled = (Debug.Dr7 >> (i * 2)) & 3;
++    const bool Execute = ((Debug.Dr7 >> (16 + i * 4)) & 3) == 0;
++    const uint64_t Address = Enabled && Execute ? Debug.Dr[i] : 0;
++
++    Thread->CurrentFrame->State.execute_breakpoints[i] = Address;
++    if (!Address) {
++      continue;
++    }
++
++    bool Added;
++    {
++      std::scoped_lock Lock(CTX->GetCodeInvalidationMutex());
++      Added = CTX->AddExecuteBreakpoint(Address);
++    }
++    if (Added && InvalidationTracker) {
++      // Code compiled there before has no check
++      InvalidationTracker->InvalidateAlignedInterval(Address, 1, false);
++    }
++  }
++}
++
++void FillDebugContext(const DebugRegisters& Debug, CONTEXT* Context) {
++  Context->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
++  Context->Dr0 = Debug.Dr[0];
++  Context->Dr1 = Debug.Dr[1];
++  Context->Dr2 = Debug.Dr[2];
++  Context->Dr3 = Debug.Dr[3];
++  Context->Dr6 = Debug.Dr6;
++  Context->Dr7 = Debug.Dr7;
++}
++
+ bool IsEmulatorStackAddress(const ThreadCPUArea CPUArea, uint64_t Address) {
+   return Address <= CPUArea.EmulatorStackBase() && Address >= CPUArea.EmulatorStackLimit();
+ }
+@@ -501,6 +564,24 @@ static void RethrowGuestException(const EXCEPTION_RECORD& Rec, ARM64_NT_CONTEXT&
+   EFlags &= ~(1 << FEXCore::X86State::RFLAG_TF_RAW_LOC);
+   CTX->SetFlagsFromCompactedEFLAGS(Thread, EFlags);
+ 
++  // The debug status (Dr6) of a #DB raised in the JIT, with the reserved bits set as x86 has them
++  if (Fault.FaultToTopAndGeneratedException && Fault.Signal == FEXCore::Core::FAULT_SIGTRAP &&
++      Fault.TrapNo == FEXCore::X86State::X86_TRAPNO_DB) {
++    auto* Data = GetFrontendThreadData(Thread);
++    if (Fault.si_code == 4) { // TRAP_HWBKPT: an execute breakpoint, see ExecuteBreakpointCheck
++      uint64_t Hits = 0;
++      for (size_t i = 0; i < 4; i++) {
++        if (Thread->CurrentFrame->State.execute_breakpoints[i] == GuestContext.Pc) {
++          Hits |= 1ULL << i;
++        }
++      }
++      Data->Debug.Dr6 = 0xffff0ff0 | Hits;
++      Data->BreakpointHitRIP = GuestContext.Pc;
++    } else {
++      Data->Debug.Dr6 = 0xffff4ff0; // BS: single step
++    }
++  }
++
+   BOOL FirstChance = TRUE;
+   EXCEPTION_RECORD GuestRec = FEX::Windows::HandleGuestException(Fault, Rec, GuestContext.Pc, GuestContext.X8, GuestContext.X0, FirstChance);
+   if (GuestRec.ExceptionCode == EXCEPTION_SINGLE_STEP) {
+@@ -783,6 +864,19 @@ NTSTATUS ResetToConsistentState(EXCEPTION_RECORD* Exception, CONTEXT* GuestConte
+     NtContinueNative(NativeContext, false);
+   }
+ 
++  // The exception goes to the guest's handlers, give them the debug registers
++  if (GuestContext) {
++    auto* Data = GetFrontendThreadData(CPUArea.ThreadState());
++    FillDebugContext(Data->Debug, GuestContext);
++    // As on Linux, report RF for an execute breakpoint so that a handler can continue at the
++    // instruction without the breakpoint trapping again.
++    if (Exception->ExceptionCode == EXCEPTION_SINGLE_STEP && Data->BreakpointHitRIP &&
++        Data->BreakpointHitRIP == reinterpret_cast<uint64_t>(Exception->ExceptionAddress)) {
++      GuestContext->EFlags |= 0x10000;
++      Data->BreakpointHitRIP = 0;
++    }
++  }
++
+   CPUArea.Area->InSimulation = false;
+   CPUArea.Area->InSyscallCallback = false;
+   return STATUS_SUCCESS;
+@@ -1006,6 +1100,13 @@ NTSTATUS ThreadInit() {
+     if (StatAllocHandler) {
+       Thread->ThreadStats = StatAllocHandler->AllocateSlot(ThreadTID);
+     }
++
++    // Debug registers set while the thread was suspended before it started
++    if (auto It = PendingDebugRegisters.find(ThreadTID); It != PendingDebugRegisters.end()) {
++      GetFrontendThreadData(Thread)->Debug = It->second;
++      ApplyDebugRegisters(Thread, It->second);
++      PendingDebugRegisters.erase(It);
++    }
+   }
+ 
+   CPUArea.ThreadState() = Thread;
+@@ -1043,6 +1144,7 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
+ 
+   {
+     std::scoped_lock Lock(ThreadCreationMutex);
++    PendingDebugRegisters.erase(ThreadTID);
+     auto it = Threads.find(ThreadTID);
+     if (it == Threads.end()) {
+       // Thread already terminated
+@@ -1071,6 +1173,57 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
+   return STATUS_SUCCESS;
+ }
+ 
++// Called by Wine's ARM64EC NtSetContextThread, NtContinue and NtContinueEx (a vstbridge wine-fex
++// patch) with the x64 context: takes Dr0-Dr3, Dr6 and Dr7, and RF from EFlags.
++void SetThreadDebugContext(HANDLE Thread, const CONTEXT* Context) {
++  const bool SetsDebug = (Context->ContextFlags & CONTEXT_DEBUG_REGISTERS) == CONTEXT_DEBUG_REGISTERS;
++  const bool SetsControl = (Context->ContextFlags & CONTEXT_CONTROL) == CONTEXT_CONTROL;
++  if (!SetsDebug && !SetsControl) {
++    return;
++  }
++
++  std::scoped_lock Lock(ThreadCreationMutex);
++  const auto [ThreadState, TID] = LookupThread(Thread);
++  if (!TID) {
++    return;
++  }
++
++  if (SetsDebug) {
++    const DebugRegisters Debug {
++      .Dr = {Context->Dr0, Context->Dr1, Context->Dr2, Context->Dr3},
++      .Dr6 = Context->Dr6,
++      .Dr7 = Context->Dr7,
++    };
++    if (ThreadState) {
++      GetFrontendThreadData(ThreadState)->Debug = Debug;
++      ApplyDebugRegisters(ThreadState, Debug);
++    } else {
++      PendingDebugRegisters[TID] = Debug;
++    }
++  }
++
++  if (SetsControl && ThreadState) {
++    ThreadState->CurrentFrame->State.breakpoint_resume_rip = (Context->EFlags & 0x10000) ? Context->Rip : 0;
++  }
++}
++
++// Called by Wine's ARM64EC NtGetContextThread when the debug registers are asked for
++void GetThreadDebugContext(HANDLE Thread, CONTEXT* Context) {
++  std::scoped_lock Lock(ThreadCreationMutex);
++  const auto [ThreadState, TID] = LookupThread(Thread);
++  if (!TID) {
++    return;
++  }
++
++  DebugRegisters Debug {};
++  if (ThreadState) {
++    Debug = GetFrontendThreadData(ThreadState)->Debug;
++  } else if (auto It = PendingDebugRegisters.find(TID); It != PendingDebugRegisters.end()) {
++    Debug = It->second;
++  }
++  FillDebugContext(Debug, Context);
++}
++
+ BOOLEAN BTCpu64IsProcessorFeaturePresent(UINT Feature) {
+   return CPUFeatures->IsFeaturePresent(Feature) ? TRUE : FALSE;
+ }
+diff --git a/Source/Windows/ARM64EC/libarm64ecfex.def b/Source/Windows/ARM64EC/libarm64ecfex.def
+index bb51ca889..248f003ed 100644
+--- a/Source/Windows/ARM64EC/libarm64ecfex.def
++++ b/Source/Windows/ARM64EC/libarm64ecfex.def
+@@ -18,6 +18,8 @@ EXPORTS
+   ProcessInit
+   ProcessTerm
+   ResetToConsistentState
++  SetThreadDebugContext
++  GetThreadDebugContext
+   ThreadInit
+   ThreadTerm
+   UpdateProcessorInformation

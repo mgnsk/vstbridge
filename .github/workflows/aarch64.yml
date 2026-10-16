@@ -139,7 +139,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: dist/vstbridge-fex-aarch64.tar.xz
-          key: fex-${{ hashFiles('aarch64/versions.sh', 'aarch64/lib.sh', 'aarch64/build-fex.sh') }}
+          key: fex-${{ hashFiles('aarch64/versions.sh', 'aarch64/lib.sh', 'aarch64/build-fex.sh', 'aarch64/fex/patches/**') }}
 
       - name: Build dependencies
         if: steps.cache.outputs.cache-hit != 'true'

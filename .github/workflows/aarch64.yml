@@ -17,7 +17,7 @@
 # - check: installs the packages in a clean trixie container and runs vstbridgectl sync, which
 #   creates a Wine prefix and starts the plugin host through Wine
 #
-# Pushes here build and check. The "vstbridge for Pivuan" workflow in rations/pivuan calls this
+# Started by hand here, it builds and checks. The "vstbridge for Pivuan" workflow in rations/pivuan calls this
 # workflow (workflow_call) to build the packages in its own run, then publishes the pivuan-debs
 # artifact to the Pivuan apt repository with its own token, as it does XLibre. So this
 # repository needs no secrets and makes no releases. When called, the jobs check out the
@@ -29,6 +29,7 @@
 
 name: aarch64 build
 
+# Started by hand only, to save Actions minutes: no push, pull request or schedule triggers.
 on:
   workflow_dispatch:
   workflow_call:
@@ -45,14 +46,6 @@ on:
       version:
         description: "vstbridge's package version (without the -pivuan revision)"
         value: ${{ jobs.native.outputs.version }}
-  push:
-    branches: [arm64]
-    paths:
-      - "vstbridge/**"
-      - "aarch64/**"
-      - ".github/workflows/aarch64.yml"
-  pull_request:
-    branches: [arm64]
 
 permissions:
   contents: read

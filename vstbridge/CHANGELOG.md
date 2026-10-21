@@ -8,6 +8,8 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-10-21
+
 ### Added
 
 - Added an `environment` option to `vstbridge.toml`. It sets extra environment
@@ -37,12 +39,17 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   memory audio buffers, realtime scheduling and X11. A new `wine-loader` build
   option sets the Wine binary used to start it. `-Dwine-host=none` builds only
   the native plugin libraries.
-- Added scripts and CI for aarch64 builds of Wine (wine-staging 11.18) and FEX.
-  They include patches for JUCE 8 GUIs without DXVK and for using FEX as the
-  default Wow64 emulator.
+- Added scripts and CI for aarch64 builds of Wine (wine-staging 11.19) and FEX.
+  Their patches make JUCE 8 GUIs work without DXVK, use FEX as the default
+  Wow64 emulator, let iLok's installer and PACE-protected plugins (such as
+  Neural DSP's) run under FEX, keep Wine from hanging on the Raspberry Pi's
+  GPU, and stop Desktop shortcuts from showing twice.
 - Added Debian packages for Pivuan: `vstbridge`, installed system-wide, and
   `wine-fex`, `wine-fex-i386` and `wine-fex-mono`. They're built in
-  rations/pivuan.
+  rations/pivuan. Their version is the release version: `0.0.3-pivuan1` for
+  this release, and `0.0.3+git<commits>.<commit>` for builds after it.
+- Added `make-arm-release.sh`, which packages those four packages with an
+  apt-based installer as `vstbridge-<version>-aarch64.tar`.
 
 ### Changed
 
@@ -53,7 +60,6 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   found. The chainloader and vstbridgectl also search the
   `aarch64-linux-gnu` library directories.
 - `install.sh` and `uninstall.sh` now handle `vstbridge-host-unixlib.so`.
-
 - Release tarballs are now built with `make-release.sh`, which replaces
   `package.sh`. They're named `vstbridge-<version>-x86_64.tar.gz` and come
   with a `.sha256` file. They still unpack into `vstbridge/`. They now
@@ -62,6 +68,16 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fixed clicks landing in the wrong place after moving a plugin window in
+  XEmbed mode while Num Lock was on. Keyboard modifiers and lock keys are now
+  ignored when checking for held mouse buttons. Thanks to Manu Mistral.
+- A plugin whose Wine host exits before it connects, for example because the
+  plugin has no license and fails to load, now fails to load in the DAW instead
+  of ending the DAW's process.
+- A plugin host that hasn't exited 5 seconds after it was asked to is now
+  killed, so a plugin that hangs while unloading no longer hangs the DAW or its
+  plugin scanner.
+- Fixed a crash when `wine --version` prints nothing.
 - Fixed a race in vstbridgectl's Makefile where `make -j` could compile
   sources before the dependencies had been fetched.
 

@@ -1,6 +1,6 @@
 # vstbridge
 
-vstbridge is a fork of [yabridge](https://github.com/robbert-vdh/yabridge) by Robbert van der Helm — a Wine-based bridge that allows Linux DAWs to load Windows VST2, VST3, and CLAP plugins as if they were native plugins.
+vstbridge is a fork of [yabridge](https://github.com/robbert-vdh/yabridge) by Robbert van der Helm — a Wine-based bridge that allows Linux DAWs to load Windows VST®2, VST3, and CLAP plugins as if they were native plugins.
 
 Yabridge is an excellent project and this fork would not exist without it. All credit for the core bridging architecture, the IPC design, the chainloader system, and the VST3/CLAP compatibility work belongs to Robbert and the yabridge contributors. If you are on a distro with yabridge packages (Arch, Manjaro, etc.) and do not need the fixes below, use upstream yabridge.
 
@@ -18,18 +18,20 @@ Upstream yabridge 5.1.1 breaks with Wine ≥ 9.21: plugins render their GUI but 
 
 XEmbed is also enabled by default in this fork (`editor_xembed = true` in `src/common/configuration.h`).
 
-For the full technical analysis see [readme-fixes.md](readme-fixes.md).
+For the full technical analysis see [readme-fixes.md](https://github.com/rations/vstbridge/blob/master/readme-fixes.md).
 
 ### GTK3 GUI for vstbridgectl
 
 The upstream yabridgectl management tool is command-line only. vstbridge adds a GTK3 graphical interface (`vstbridgectl-gtk`) for users who prefer not to use the terminal.
 
-The GUI has four tabs:
+The GUI has these tabs:
 
 - **Directories** — add and remove the directories vstbridge scans for Windows plugins
 - **Sync** — run a sync with options for force, prune, verbose output, and skipping the compatibility check; live output is shown in the window
 - **Status** — show the current vstbridge installation status and detected Wine version
 - **Settings** — set the vstbridge installation path, choose between centralized and inline VST2 install modes, and toggle the Wine/vstbridge compatibility check
+- **Blacklist** — exclude paths from the plugin scan
+- **Plugins** — change per-plugin settings, such as Wine DLL overrides and editor options, without editing `vstbridge.toml` by hand
 
 ---
 
@@ -67,11 +69,12 @@ Release binaries require glibc ≥ 2.34 and libstdc++ ≥ GCC 11 (built on Devua
 Download the latest release tarball from the [releases page](https://github.com/rations/vstbridge/releases), then extract and run the installer:
 
 ```bash
-tar -xf vstbridge-0.0.2.tar.gz
+tar -xf vstbridge-<version>-x86_64.tar.gz
 cd vstbridge
-chmod +x install.sh
 ./install.sh
 ```
+
+Each tarball comes with a `.sha256` file. You can check the download with `sha256sum -c vstbridge-<version>-x86_64.sha256`.
 
 The installer copies everything to `~/.local/share/vstbridge/` and adds `vstbridgectl-gtk` to your application menu. No root or sudo is required.
 
@@ -111,6 +114,19 @@ Shows the currently installed vstbridge version, the detected Wine version, and 
 The vstbridge path is pre-configured to `~/.local/share/vstbridge` by the installer and does not need to be changed. You would only use this tab if you have moved the bridge files to a different location.
 
 VST2 plugins are installed in centralized mode — vstbridgectl creates `~/.vst/vstbridge/` and mirrors your plugin directory structure inside it, placing the bridge `.so` alongside a copy of the Windows `.dll`. For example, a plugin at `~/.wine/drive_c/Program Files/VstPlugins/Toontrack/Superior Drummer.dll` becomes `~/.vst/vstbridge/Toontrack/Superior Drummer.so`.
+
+### Plugins tab
+
+Lists every plugin found in your plugin directories. Double-click a plugin, or select it and click **Configure...**, to change its settings:
+
+- the plugin group
+- the editor and compatibility options
+- the editor frame rate
+- extra Wine environment variables, one `KEY=VALUE` per line, for example `WINEDLLOVERRIDES=d3d11,dxgi=n,b`
+
+These are the same options described under [Configuration](#configuration).
+
+The settings are saved as a section for that plugin in the `vstbridge.toml` that vstbridge reads for it, usually `~/.vst3/vstbridge/vstbridge.toml` (or `~/.vst/…`, `~/.clap/…`). The rest of the file, including comments, is left untouched. The section is placed above any broader patterns so it takes precedence. **Reset to Defaults** removes the section again. Plugins with their own section are marked "custom settings" in the list. Changes apply the next time the plugin is loaded.
 
 ### Configuring your DAW
 
@@ -225,11 +241,56 @@ cd tools/vstbridgectl
 make
 ```
 
+### Making a release tarball
+
+`make-release.sh` builds vstbridge (with the 32-bit host) and vstbridgectl from scratch in a temporary directory, then packages them with the installer:
+
+```bash
+./make-release.sh                    # writes dist/vstbridge-<version>-x86_64.tar.gz and .sha256
+./make-release.sh --max-glibc 2.34   # also fail if the binaries need a newer glibc
+```
+
+The version comes from `git describe`. On a tagged commit (`v0.0.3`) you get `vstbridge-0.0.3-x86_64.tar.gz`. On any other commit you get a test build named after that commit, such as `vstbridge-0.0.2-16-gc41c2b1-x86_64.tar.gz`. The tracked files must be committed first.
+
+Before writing the archive, the script checks that:
+
+- it contains exactly the expected files
+- the binaries contain no paths from the build machine
+- the binaries only link expected libraries
+
+It also prints the minimum glibc the binaries need. It then unpacks the archive, installs it into a scratch home directory, checks that vstbridgectl finds the installed files, and uninstalls it again. Published releases are built on Devuan Daedalus so they run on older distributions.
+
 ---
 
 ## Configuration
 
 Plugin-level configuration is done via a `vstbridge.toml` file placed alongside plugin files or in a parent directory. See the upstream [yabridge configuration documentation](https://github.com/robbert-vdh/yabridge#configuration) for the available options — the TOML structure is unchanged.
+
+vstbridge adds a few options on top of yabridge's:
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `editor_xembed` | `{true,false}` | Embed the editor with XEmbed. Defaults to `true`. Set it to `false` to use yabridge's reparenting method instead. |
+| `editor_coordinate_hack` | `{true,false}` | Move the Wine window back to `(0, 0)` after every resize. This helps plugins that draw their GUI offset by the window's screen position. Defaults to `false`. |
+| `environment` | `["KEY=VALUE", ...]` | Extra environment variables for this plugin's Wine host process. They override vstbridge's own settings, including `WINEPREFIX`. Defaults to none. |
+
+`environment` lets plugins with different Wine requirements share one prefix. For example, you can give one plugin its own DLL overrides:
+
+```toml
+# ~/.vst3/vstbridge/vstbridge.toml
+["SSL Native*.vst3"]
+environment = ["WINEDLLOVERRIDES=d3d11,dxgi=n,b"]
+
+["Roland Cloud/*"]
+editor_xembed = false
+```
+
+A few things to keep in mind:
+
+- The settings apply per plugin, not per instance. VST3 and CLAP host every instance of a plugin in a single process.
+- In a plugin group, all plugins share one process. The `environment` of the plugin that started the group is the one that's used.
+- vstbridge uses the first section whose pattern matches the plugin, and sections don't merge. Put specific patterns above broad ones like `["*"]`.
+- `WINELOADER` can't be set through `environment`, because vstbridge reads it before the host process starts. Set it in your DAW's environment instead.
 
 ### Environment variables
 
@@ -245,3 +306,7 @@ Plugin-level configuration is done via a `vstbridge.toml` file placed alongside 
 ## License
 
 GPL-3.0 — same as upstream yabridge. Copyright in individual source files is retained by the original author, Robbert van der Helm.
+
+VST3 support is built with the Steinberg VST3 SDK 3.7.7, used under the terms of the GPL-3.0. VST2 support uses the VeSTige headers from LMMS and contains no code from Steinberg's VST2 SDK.
+
+VST is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries. vstbridge is not affiliated with or endorsed by Steinberg.

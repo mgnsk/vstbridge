@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: vstbridge readme
+    about: Installation, DAW setup, and configuration instructions for vstbridge
+    url: https://github.com/rations/vstbridge#readme

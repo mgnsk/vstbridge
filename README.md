@@ -1,6 +1,6 @@
 # vstbridge
 
-vstbridge is a fork of [yabridge](https://github.com/robbert-vdh/yabridge) by Robbert van der Helm — a Wine-based bridge that allows Linux DAWs to load Windows VST2, VST3, and CLAP plugins as if they were native plugins.
+vstbridge is a fork of [yabridge](https://github.com/robbert-vdh/yabridge) by Robbert van der Helm — a Wine-based bridge that allows Linux DAWs to load Windows VST®2, VST3, and CLAP plugins as if they were native plugins.
 
 Yabridge is an excellent project and this fork would not exist without it. All credit for the core bridging architecture, the IPC design, the chainloader system, and the VST3/CLAP compatibility work belongs to Robbert and the yabridge contributors. If you are on a distro with yabridge packages (Arch, Manjaro, etc.) and do not need the fixes below, use upstream yabridge.
 
@@ -306,3 +306,7 @@ A few things to keep in mind:
 ## License
 
 GPL-3.0 — same as upstream yabridge. Copyright in individual source files is retained by the original author, Robbert van der Helm.
+
+VST3 support is built with the Steinberg VST3 SDK 3.7.7, used under the terms of the GPL-3.0. VST2 support uses the VeSTige headers from LMMS and contains no code from Steinberg's VST2 SDK.
+
+VST is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries. vstbridge is not affiliated with or endorsed by Steinberg.

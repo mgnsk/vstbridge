@@ -7,17 +7,18 @@ body:
       label: Thanks for giving vstbridge a shot!
       description: >-
         If you're having issues with plugins not working at all or scans timing
-        out then make sure to check out the [troubleshooting common
-        issues](https://github.com/robbert-vdh/vstbridge#troubleshooting-common-issues)
-        section of the readme. You should also read through the [known issues
-        and
-        fixes](https://github.com/robbert-vdh/vstbridge#known-issues-and-fixes)
-        section. There may already be a solution or a workaround for the issue
-        you're having.
+        out then make sure you've followed the
+        [installation](https://github.com/rations/vstbridge#installation) and
+        [configuring your
+        DAW](https://github.com/rations/vstbridge#configuring-your-daw) steps
+        in the readme. You should also search the [existing
+        issues](https://github.com/rations/vstbridge/issues?q=is%3Aissue).
+        There may already be a solution or a workaround for the issue you're
+        having.
       options:
         - label: >-
-            I read through both the troubleshooting and the known issues
-            sections, and my issue wasn't listed there
+            I followed the setup steps in the readme and searched the existing
+            issues, and my issue wasn't listed there
           required: true
   - type: textarea
     id: description
@@ -58,14 +59,14 @@ body:
     id: vstbridge-version
     attributes:
       label: vstbridge version
-      placeholder: e.g. 3.5.2, or commit a29f43a
+      placeholder: e.g. 0.0.2, or commit 26acf3c
     validations:
       required: true
   - type: input
     id: vstbridgectl-version
     attributes:
       label: vstbridgectl version
-      placeholder: e.g. 3.5.2, or commit a29f43a
+      placeholder: e.g. 0.0.2, or commit 26acf3c
     validations:
       required: true
   - type: input
@@ -73,9 +74,19 @@ body:
     attributes:
       label: Wine version
       description: Run `wine --version` if you're not sure about this.
-      placeholder: e.g. Wine Staging 4.20, or wine-tkg 6.14
+      placeholder: e.g. Wine Staging 11.09, or wine-tkg 10.0
     validations:
       required: true
+  - type: input
+    id: yabridge-comparison
+    attributes:
+      label: Does the plugin work with upstream yabridge?
+      description: >-
+        If you've tried it, please include the yabridge and Wine versions you
+        used.
+      placeholder: e.g. yes, with yabridge 5.1.1 and Wine Staging 9.20
+    validations:
+      required: false
   - type: input
     id: plugin
     attributes:
@@ -87,7 +98,7 @@ body:
     id: plugin-type
     attributes:
       label: Plugin type
-      options: ["VST2", "VST3", "both VST2 and VST3"]
+      options: ["VST2", "VST3", "CLAP", "more than one of these"]
     validations:
       required: true
   - type: dropdown
@@ -101,7 +112,7 @@ body:
     id: host
     attributes:
       label: Host
-      placeholder: e.g. Bitwig Studio 4.0.1
+      placeholder: e.g. Bitwig Studio 5.3
     validations:
       required: true
   - type: input
@@ -139,10 +150,10 @@ body:
         2. Launch your host from a terminal using:
 
            ```bash
-           rm -f /tmp/vstbridge.log; env YABRIDGE_DEBUG_FILE=/tmp/vstbridge.log YABRIDGE_DEBUG_LEVEL=2+editor <host>
+           rm -f /tmp/vstbridge.log; env VSTBRIDGE_DEBUG_FILE=/tmp/vstbridge.log VSTBRIDGE_DEBUG_LEVEL=2+editor <host>
            ```
 
-           Where `<host>` is the name of your host, like `bitwig-studio`, `reaper`, or `ardour6`.
+           Where `<host>` is the name of your host, like `bitwig-studio`, `reaper`, or `ardour8`.
 
         3. Try to scan or load the plugin that's causing issues.
         4. `/tmp/vstbridge.log` should now contain a debug log. You can drag this file directly onto the text field below to upload it to GitHub.

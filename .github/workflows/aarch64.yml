@@ -180,7 +180,7 @@ jobs:
         with:
           repository: ${{ env.VSTBRIDGE_REPOSITORY }}
           ref: ${{ env.VSTBRIDGE_REF }}
-          # The package version counts the commits
+          # The package version comes from the latest tag and the commits since
           fetch-depth: 0
 
       - name: Cache llvm-mingw
@@ -204,14 +204,17 @@ jobs:
             -Dwine-host=pe --cross-file cross-arm64ec.conf \
             -Dwine-loader=/opt/vstbridge/wine/bin/wine
 
-      # <meson version>+git<commits>.<commit>: newer commits get higher versions
+      # The release version from the latest v<version> tag, as for the x86_64 tarball: 0.0.3 on
+      # the tag, and 0.0.3+git<commits since the tag>.<commit> after it, which apt sorts after
+      # 0.0.3 and before 0.0.4. (meson.build still carries yabridge's version.)
       - name: Version
         id: version
         run: |
           set -eu
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          meson_version="$(meson introspect vstbridge/build --projectinfo | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')"
-          version="${meson_version}+git$(git rev-list --count HEAD).$(git rev-parse --short=9 HEAD)"
+          describe="$(git describe --tags --match 'v[0-9]*' --abbrev=9)" ||
+            { echo "::error::no v<version> tag is reachable from $(git rev-parse --short HEAD)"; exit 1; }
+          version="$(printf '%s\n' "${describe#v}" | sed -E 's/-([0-9]+)-g([0-9a-f]+)$/+git\1.\2/')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "vstbridge $version"
 

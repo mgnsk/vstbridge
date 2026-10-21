@@ -28,9 +28,9 @@
 # OS trixie): the packages depend on trixie's library packages. wine-fex conflicts with Debian's
 # wine, since both install /usr/bin/wine; apt shows the removal and asks first.
 #
-# THE VERSION is the git tag, as in make-release.sh (v0.0.3 gives 0.0.3), or --version. The
-# packages carry their own versions, which this prints and the README lists, so check that the
-# artifact was built from the code the version names.
+# THE VERSION is the git tag, as in make-release.sh (v0.0.3 gives 0.0.3), or --version. The CI
+# gives the vstbridge package the same version (0.0.3-pivuan1), so this checks that the artifact
+# was built from the code the version names. The Wine packages carry their own versions.
 #
 # The archive is a plain tar: the .debs are already compressed. Member order, owners, modes and
 # mtimes are normalised, as in make-release.sh.
@@ -163,6 +163,15 @@ for var in vstbridge wine_fex wine_fex_i386 wine_fex_mono; do
     cp "$deb" "$out/"
 done
 say "the four packages are there, for arm64, and their versions fit together"
+
+# 3. The vstbridge package was built from this version: a tagged build is <version>-pivuan<n>,
+#    while one from a later commit would be <version>+git<commits>.<commit>-pivuan<n>
+case $(version_of "$vstbridge") in
+    "$version"-pivuan[0-9]*) ;;
+    *) die "the vstbridge package is $(version_of "$vstbridge"), not a build of $version.
+Run the aarch64 build on the v$version tag's commit, or pass the matching --version." ;;
+esac
+say "the vstbridge package is a build of $version"
 
 # ---------------------------------------------------------------------------------------------
 # install.sh, uninstall.sh, README.txt and SHA256SUMS.

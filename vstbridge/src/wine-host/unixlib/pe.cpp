@@ -154,7 +154,27 @@ std::optional<std::string> init() {
 }
 
 void call(Call code, void* args) {
-    vstbridge_unix_call(unixlib_handle, code, args);
+    // The unixlib's functions always return 0, so this means the call never
+    // ran and `args` wasn't filled in
+    if (const NTSTATUS status = vstbridge_unix_call(unixlib_handle, code, args);
+        status != 0) {
+        fprintf(stderr, "unixlib call %u failed with status 0x%08lx\n",
+                static_cast<unsigned int>(code),
+                static_cast<unsigned long>(status));
+    }
+}
+
+void* allocate_shm_region(size_t size) {
+    return VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT,
+                        PAGE_READWRITE);
+}
+
+// Wine replaces the released range with its own reserved mapping, which also
+// unmaps the shared memory
+void free_shm_region(void* address) {
+    if (address) {
+        VirtualFree(address, 0, MEM_RELEASE);
+    }
 }
 
 wchar_t* wine_get_dos_file_name(const char* unix_path) {

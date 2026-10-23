@@ -26,12 +26,39 @@
 // thread.
 //
 // This header is compiled by both sides, so the argument structs only use
-// fixed width integers and pointers. `long` would be 32-bit on the PE side and
-// 64-bit on the Linux side.
+// fixed width integers and `ptr64`s. `long` would be 32-bit on the PE side and
+// 64-bit on the Linux side, and so would plain pointers for the 32-bit PE
+// bitbridge host (`vstbridge-host-32.exe`) on a WoW64 Wine. With these the
+// structs have the same layout for both PE architectures, and the unixlib's
+// `__wine_unix_call_wow64_funcs` can be the same table as its
+// `__wine_unix_call_funcs`.
+//
+// Under WoW64 the Linux side can use the 32-bit host's pointers as is, since
+// they point into the low 4 GiB of the same address space. The reverse isn't
+// true: libxcb's and `mmap()`'s memory lives above that, so those are copied
+// or mapped into memory allocated on the PE side instead (see `xcb-calls.h`
+// and `ShmMapArgs`).
 
 #include <stdint.h>
 
 namespace unixlib {
+
+/**
+ * A pointer stored as 64 bits on both sides.
+ */
+template <typename T>
+struct ptr64 {
+    uint64_t value = 0;
+
+    ptr64() = default;
+    // NOLINTNEXTLINE(google-explicit-constructor)
+    ptr64(T* pointer) : value(reinterpret_cast<uintptr_t>(pointer)) {}
+
+    // NOLINTNEXTLINE(google-explicit-constructor)
+    operator T*() const {
+        return reinterpret_cast<T*>(static_cast<uintptr_t>(value));
+    }
+};
 
 /**
  * Indices into `__wine_unix_call_funcs` in the unixlib. The order here must
@@ -74,7 +101,7 @@ enum Call : uint32_t {
  */
 
 struct PathFdArgs {
-    const char* path;
+    ptr64<const char> path;
     int32_t fd;
     int32_t error;
 };
@@ -88,7 +115,7 @@ struct AcceptArgs {
 struct ReadWriteArgs {
     int32_t fd;
     int32_t error;
-    void* buffer;
+    ptr64<void> buffer;
     uint64_t size;
     // The number of bytes read or written. 0 on end of file for reads.
     uint64_t result;
@@ -100,12 +127,12 @@ struct FdArgs {
 };
 
 struct PathArgs {
-    const char* path;
+    ptr64<const char> path;
     int32_t error;
 };
 
 struct SocketListeningArgs {
-    const char* path;
+    ptr64<const char> path;
     // Whether a process is listening on the socket at `path`, according to
     // `/proc/net/unix`
     int32_t listening;
@@ -115,19 +142,26 @@ struct ShmMapArgs {
     int32_t fd;
     int32_t error;
     uint64_t size;
-    // The existing mapping to grow or shrink, or null
-    void* old_address;
+    // The existing mapping to grow or shrink, or null. Not used together with
+    // `fixed_address`.
+    ptr64<void> old_address;
     uint64_t old_size;
-    void* address;
+    // If set, map the object over this PE-side allocation of `size` bytes
+    // instead of wherever `mmap()` puts it. The 32-bit host needs this since
+    // it can only address the low 4 GiB.
+    ptr64<void> fixed_address;
+    ptr64<void> address;
     // Set when mapping with `MAP_LOCKED` failed and the region was mapped
     // without locking it instead
     int32_t unlocked;
 };
 
 struct ShmDestroyArgs {
-    const char* name;
+    ptr64<const char> name;
     int32_t fd;
-    void* address;
+    // Unmapped if set. A `fixed_address` mapping is instead released by the PE
+    // side, since Wine still considers that memory its own.
+    ptr64<void> address;
     uint64_t size;
 };
 
@@ -137,7 +171,7 @@ struct ProcessArgs {
 };
 
 struct ThreadNameArgs {
-    const char* name;
+    ptr64<const char> name;
 };
 
 struct RealtimePriorityArgs {
@@ -146,5 +180,19 @@ struct RealtimePriorityArgs {
     // For `sched_set_realtime_priority`, whether it succeeded
     int32_t success;
 };
+
+// The layouts have to be the same in the 32-bit PE host, the 64-bit one, and
+// the unixlib
+static_assert(sizeof(PathFdArgs) == 16);
+static_assert(sizeof(AcceptArgs) == 12);
+static_assert(sizeof(ReadWriteArgs) == 32);
+static_assert(sizeof(FdArgs) == 8);
+static_assert(sizeof(PathArgs) == 16);
+static_assert(sizeof(SocketListeningArgs) == 16);
+static_assert(sizeof(ShmMapArgs) == 56);
+static_assert(sizeof(ShmDestroyArgs) == 32);
+static_assert(sizeof(ProcessArgs) == 8);
+static_assert(sizeof(ThreadNameArgs) == 8);
+static_assert(sizeof(RealtimePriorityArgs) == 12);
 
 }  // namespace unixlib

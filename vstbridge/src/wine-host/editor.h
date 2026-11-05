@@ -511,6 +511,16 @@ class Editor {
     bool should_fix_local_coordinates_ = false;
 
     /**
+     * The virtual screen origin `fix_local_coordinates()` last added to the
+     * window's root coordinates. Wine moves the origin when the primary
+     * monitor changes (xwayland-satellite makes the focused window's output
+     * primary), which can happen after the `ConfigureNotify` for the move
+     * that caused it, leaving the Win32 position off by a monitor width.
+     * `handle_x11_events()` redoes the fix when the origin no longer matches.
+     */
+    mutable POINT spoofed_virtual_screen_origin_{};
+
+    /**
      * Set to true after do_xembed() has run successfully from a VisibilityNotify
      * event. Prevents re-sending XEMBED_FOCUS_IN/WINDOW_ACTIVATE on every
      * subsequent visibility change, which causes visual glitches in plugins.

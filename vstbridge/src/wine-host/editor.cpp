@@ -555,6 +555,20 @@ void Editor::handle_x11_events() noexcept {
             should_fix_local_coordinates_ = false;
         }
 
+        // HACK: See the docstring on `spoofed_virtual_screen_origin_`
+        if (use_xembed_ && xembed_done_ && !is_mouse_button_held() &&
+            (GetSystemMetrics(SM_XVIRTUALSCREEN) !=
+                 spoofed_virtual_screen_origin_.x ||
+             GetSystemMetrics(SM_YVIRTUALSCREEN) !=
+                 spoofed_virtual_screen_origin_.y)) {
+            logger_.log_editor_trace([&]() {
+                return "DEBUG: Virtual screen origin changed, redoing the "
+                       "local coordinate fix";
+            });
+
+            fix_local_coordinates();
+        }
+
         std::unique_ptr<xcb_generic_event_t> generic_event;
         while (generic_event.reset(xcb_poll_for_event(x11_connection_.get())),
                generic_event != nullptr) {
@@ -913,9 +927,11 @@ void Editor::fix_local_coordinates() const {
         // external display with the laptop panel to its left, where without
         // this the window's idea of its position was off by the width of
         // that panel and the editor could not be clicked at all.
+        spoofed_virtual_screen_origin_ = {GetSystemMetrics(SM_XVIRTUALSCREEN),
+                                          GetSystemMetrics(SM_YVIRTUALSCREEN)};
         SetWindowPos(win32_window_.handle_, nullptr,
-                     abs_x + GetSystemMetrics(SM_XVIRTUALSCREEN),
-                     abs_y + GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0,
+                     abs_x + spoofed_virtual_screen_origin_.x,
+                     abs_y + spoofed_virtual_screen_origin_.y, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW |
                          SWP_NOSENDCHANGING);
         return;
